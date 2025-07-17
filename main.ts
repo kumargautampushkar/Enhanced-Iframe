@@ -1,290 +1,116 @@
-// main.ts
-import { Plugin, MarkdownView } from 'obsidian';
+const { Plugin } = require('obsidian');
 
-export default class IframeResizerPlugin extends Plugin {
-    private observer: MutationObserver | null = null;
-    private resizeData: Map<string, {width: string, height: string}> = new Map();
+const RESIZABLE_IFRAME_WRAPPER_CLASS = 'resizable-iframe-wrapper';
+const PROCESSED_IFRAME_ATTRIBUTE = 'data-resizable-iframe-processed';
 
+module.exports = class ResizableIframesPlugin extends Plugin {
+
+    // MutationObserver to watch for iframes being added to the DOM.
+    observer;
+
+    /**
+     * This method is called when the plugin is loaded.
+     */
     async onload() {
-        // Add styles
-        this.addStyles();
+        console.log('Loading Resizable Iframes plugin');
 
-        // Load saved resize data
-        const savedData = await this.loadData();
-        if (savedData?.resizeData) {
-            this.resizeData = new Map(Object.entries(savedData.resizeData));
-        }
+        // This is the core function that finds and wraps iframes.
+        this.processIframes = () => {
+            // Find all iframes in the workspace that haven't been processed yet.
+            const iframes = document.querySelectorAll(`iframe:not([${PROCESSED_IFRAME_ATTRIBUTE}])`);
+            iframes.forEach(this.wrapIframe.bind(this));
+        };
 
-        // Process iframes when layout changes
-        this.registerEvent(
-            this.app.workspace.on('layout-change', () => {
-                setTimeout(() => this.processAllIframes(), 100);
-            })
-        );
-
-        // Process iframes in active file when it changes
-        this.registerEvent(
-            this.app.workspace.on('active-leaf-change', () => {
-                setTimeout(() => this.processAllIframes(), 200);
-            })
-        );
-
-        // Initial processing
-        this.app.workspace.onLayoutReady(() => {
-            this.processAllIframes();
-            this.startObserving();
-        });
-
-        // Save resize data periodically
-        this.registerInterval(
-            window.setInterval(() => this.saveResizeData(), 5000)
-        );
-    }
-
-    startObserving() {
+        // The MutationObserver callback, which triggers processing when the DOM changes.
         this.observer = new MutationObserver((mutations) => {
-            let shouldProcess = false;
-            
-            mutations.forEach((mutation) => {
-                mutation.addedNodes.forEach((node) => {
-                    if (node instanceof HTMLElement) {
-                        // Check for iframes and Obsidian embeds
-                        if (node.tagName === 'IFRAME' || 
-                            node.querySelector('iframe') || 
-                            node.classList.contains('media-embed-embed') ||
-                            node.classList.contains('internal-embed')) {
-                            shouldProcess = true;
+            // Use a flag to avoid reprocessing iframes multiple times in one go.
+            let iframesAdded = false;
+            for (const mutation of mutations) {
+                if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
+                    mutation.addedNodes.forEach(node => {
+                        // Check if the added node is an iframe or contains iframes.
+                        if (node.nodeName === 'IFRAME' || (node.querySelector && node.querySelector('iframe'))) {
+                           iframesAdded = true;
                         }
-                    }
-                });
-            });
-            
-            if (shouldProcess) {
-                setTimeout(() => this.processAllIframes(), 100);
-            }
-        });
-
-        const workspaceEl = document.querySelector('.workspace');
-        if (workspaceEl) {
-            this.observer.observe(workspaceEl, {
-                childList: true,
-                subtree: true
-            });
-        }
-    }
-
-    addStyles() {
-        const styleEl = document.createElement('style');
-        styleEl.id = 'iframe-resizer-styles';
-        styleEl.textContent = `
-            .iframe-container {
-                position: relative;
-                display: inline-block;
-                min-width: 200px;
-                min-height: 150px;
-                border: 2px solid transparent;
-                transition: border-color 0.2s;
-                resize: both;
-                overflow: auto;
-                max-width: 100%;
-                margin: 5px 0;
-            }
-
-            .iframe-container:hover {
-                border-color: var(--interactive-accent);
-            }
-
-            .iframe-container > iframe,
-            .iframe-container .internal-embed iframe {
-                position: absolute !important;
-                top: 0 !important;
-                left: 0 !important;
-                width: 100% !important;
-                height: 100% !important;
-                border: none !important;
-                display: block !important;
-            }
-
-            /* Handle internal embeds */
-            .iframe-container > .internal-embed {
-                width: 100% !important;
-                height: 100% !important;
-                position: relative;
-            }
-
-            .iframe-container > .internal-embed > * {
-                width: 100% !important;
-                height: 100% !important;
-            }
-
-            /* Resize handle styling */
-            .iframe-container::-webkit-resizer {
-                background-color: transparent;
-            }
-
-            .iframe-container::after {
-                content: '';
-                position: absolute;
-                bottom: 0;
-                right: 0;
-                width: 16px;
-                height: 16px;
-                cursor: nwse-resize;
-                background: linear-gradient(
-                    135deg,
-                    transparent 50%,
-                    var(--interactive-accent) 50%
-                );
-                opacity: 0;
-                transition: opacity 0.2s;
-                pointer-events: none;
-            }
-
-            .iframe-container:hover::after {
-                opacity: 0.5;
-            }
-
-            /* Prevent iframe interaction during resize */
-            .iframe-container:active iframe {
-                pointer-events: none;
-            }
-        `;
-        document.head.appendChild(styleEl);
-    }
-
-    processAllIframes() {
-        const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
-        if (!activeView) return;
-
-        const contentEl = activeView.contentEl;
-        
-        // Process all iframes, including those in embeds
-        const allIframes = contentEl.querySelectorAll('iframe');
-        allIframes.forEach((iframe: HTMLIFrameElement) => {
-            // Skip if already in a container
-            if (iframe.closest('.iframe-container')) {
-                return;
-            }
-
-            // Check if this is part of an internal embed
-            const internalEmbed = iframe.closest('.internal-embed');
-            if (internalEmbed && !internalEmbed.parentElement?.classList.contains('iframe-container')) {
-                this.wrapElement(internalEmbed as HTMLElement, iframe);
-            } else if (!internalEmbed) {
-                this.wrapElement(iframe, iframe);
-            }
-        });
-
-        // Restore saved sizes
-        this.restoreSavedSizes();
-    }
-
-    wrapElement(elementToWrap: HTMLElement, iframe: HTMLIFrameElement) {
-        // Create container
-        const container = document.createElement('div');
-        container.className = 'iframe-container';
-        
-        // Generate ID for this iframe based on src
-        const iframeId = this.getIframeId(iframe);
-        container.setAttribute('data-iframe-id', iframeId);
-        
-        // Get dimensions
-        let width = '600px';
-        let height = '400px';
-        
-        // Check for saved dimensions first
-        const saved = this.resizeData.get(iframeId);
-        if (saved) {
-            width = saved.width;
-            height = saved.height;
-        } else {
-            // Try to get dimensions from the element
-            const computedStyle = window.getComputedStyle(elementToWrap);
-            if (computedStyle.width && computedStyle.width !== 'auto' && computedStyle.width !== '100%') {
-                width = computedStyle.width;
-            }
-            if (computedStyle.height && computedStyle.height !== 'auto' && computedStyle.height !== '100%') {
-                height = computedStyle.height;
-            }
-        }
-        
-        // Set container dimensions
-        container.style.width = width;
-        container.style.height = height;
-        
-        // Insert container and move element
-        elementToWrap.parentNode?.insertBefore(container, elementToWrap);
-        container.appendChild(elementToWrap);
-        
-        // Add resize observer to save dimensions
-        this.observeResize(container);
-    }
-
-    getIframeId(iframe: HTMLIFrameElement): string {
-        // Create a unique ID based on the iframe src
-        const src = iframe.src || iframe.getAttribute('src') || '';
-        return btoa(src).replace(/[^a-zA-Z0-9]/g, '').substring(0, 20);
-    }
-
-    observeResize(container: HTMLElement) {
-        const resizeObserver = new ResizeObserver((entries) => {
-            for (const entry of entries) {
-                const target = entry.target as HTMLElement;
-                const iframeId = target.getAttribute('data-iframe-id');
-                if (iframeId) {
-                    this.resizeData.set(iframeId, {
-                        width: target.style.width,
-                        height: target.style.height
                     });
                 }
             }
-        });
-        
-        resizeObserver.observe(container);
-        
-        // Store observer for cleanup
-        this.register(() => resizeObserver.disconnect());
-    }
-
-    restoreSavedSizes() {
-        document.querySelectorAll('.iframe-container[data-iframe-id]').forEach((container: HTMLElement) => {
-            const iframeId = container.getAttribute('data-iframe-id');
-            if (iframeId) {
-                const saved = this.resizeData.get(iframeId);
-                if (saved) {
-                    container.style.width = saved.width;
-                    container.style.height = saved.height;
-                }
+            if (iframesAdded) {
+                this.processIframes();
             }
         });
+
+        // Start observing the entire workspace for changes.
+        this.observer.observe(document.body, {
+            childList: true,
+            subtree: true
+        });
+
+        // Run an initial scan to process any iframes already present on load.
+        this.app.workspace.onLayoutReady(() => {
+            this.processIframes();
+        });
     }
 
-    async saveResizeData() {
-        const dataToSave = {
-            resizeData: Object.fromEntries(this.resizeData)
-        };
-        await this.saveData(dataToSave);
-    }
+    /**
+     * This method is called when the plugin is unloaded.
+     */
+    onunload() {
+        console.log('Unloading Resizable Iframes plugin');
 
-    async onunload() {
-        // Save final resize data
-        await this.saveResizeData();
-
-        // Stop observing
+        // Disconnect the observer to stop watching for DOM changes.
         if (this.observer) {
             this.observer.disconnect();
         }
 
-        // Remove styles
-        document.getElementById('iframe-resizer-styles')?.remove();
-        
-        // Unwrap all containers
-        document.querySelectorAll('.iframe-container').forEach(container => {
-            const content = container.firstElementChild;
-            if (content && container.parentNode) {
-                container.parentNode.insertBefore(content, container);
-                container.remove();
+        // Clean up by unwrapping all the iframes that the plugin has modified.
+        document.querySelectorAll(`.${RESIZABLE_IFRAME_WRAPPER_CLASS}`).forEach(wrapper => {
+            const iframe = wrapper.querySelector('iframe');
+            if (iframe) {
+                // Move the iframe out of the wrapper, right before it.
+                wrapper.parentNode.insertBefore(iframe, wrapper);
+                // Remove the processed attribute from the iframe.
+                iframe.removeAttribute(PROCESSED_IFRAME_ATTRIBUTE);
             }
+            // Remove the wrapper div.
+            wrapper.remove();
         });
+    }
+
+    /**
+     * Wraps a single iframe element with a resizable container.
+     * @param {HTMLIFrameElement} iframeEl The iframe element to wrap.
+     */
+    wrapIframe(iframeEl) {
+        // Double-check that we are not processing an already-processed iframe.
+        if (iframeEl.hasAttribute(PROCESSED_IFRAME_ATTRIBUTE)) {
+            return;
+        }
+
+        // Prevent styling conflicts with existing parent elements.
+        if (iframeEl.parentElement.classList.contains(RESIZABLE_IFRAME_WRAPPER_CLASS)) {
+            return;
+        }
+
+        console.log('Wrapping an iframe:', iframeEl.src || 'No src');
+
+        // Create the wrapper div.
+        const wrapper = document.createElement('div');
+        wrapper.classList.add(RESIZABLE_IFRAME_WRAPPER_CLASS);
+
+        // Get the initial dimensions from the iframe, or use defaults.
+        const initialWidth = iframeEl.width || '600px'; // Default width if not set
+        const initialHeight = iframeEl.height || '450px'; // Default height if not set
+        wrapper.style.width = initialWidth.endsWith('px') ? initialWidth : `${initialWidth}px`;
+        wrapper.style.height = initialHeight.endsWith('px') ? initialHeight : `${initialHeight}px`;
+
+        // Insert the wrapper into the DOM right before the iframe.
+        iframeEl.parentNode.insertBefore(wrapper, iframeEl);
+
+        // Move the iframe inside the wrapper.
+        wrapper.appendChild(iframeEl);
+
+        // Mark the iframe as processed to prevent re-wrapping.
+        iframeEl.setAttribute(PROCESSED_IFRAME_ATTRIBUTE, 'true');
     }
 }
