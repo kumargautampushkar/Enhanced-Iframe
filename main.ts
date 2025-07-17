@@ -3,10 +3,17 @@ import { Plugin, MarkdownView } from 'obsidian';
 
 export default class IframeResizerPlugin extends Plugin {
     private observer: MutationObserver | null = null;
+    private resizeData: Map<string, {width: string, height: string}> = new Map();
 
     async onload() {
         // Add styles
         this.addStyles();
+
+        // Load saved resize data
+        const savedData = await this.loadData();
+        if (savedData?.resizeData) {
+            this.resizeData = new Map(Object.entries(savedData.resizeData));
+        }
 
         // Process iframes when layout changes
         this.registerEvent(
@@ -28,38 +35,35 @@ export default class IframeResizerPlugin extends Plugin {
             this.startObserving();
         });
 
-        // Watch for editor changes
-        this.registerEvent(
-            this.app.workspace.on('editor-change', () => {
-                setTimeout(() => this.processAllIframes(), 500);
-            })
+        // Save resize data periodically
+        this.registerInterval(
+            window.setInterval(() => this.saveResizeData(), 5000)
         );
     }
 
     startObserving() {
-        // Create mutation observer to watch for new iframes
         this.observer = new MutationObserver((mutations) => {
-            let hasNewIframes = false;
+            let shouldProcess = false;
             
             mutations.forEach((mutation) => {
                 mutation.addedNodes.forEach((node) => {
                     if (node instanceof HTMLElement) {
+                        // Check for iframes and Obsidian embeds
                         if (node.tagName === 'IFRAME' || 
                             node.querySelector('iframe') || 
-                            node.classList.contains('external-embed') ||
-                            node.classList.contains('media-embed')) {
-                            hasNewIframes = true;
+                            node.classList.contains('media-embed-embed') ||
+                            node.classList.contains('internal-embed')) {
+                            shouldProcess = true;
                         }
                     }
                 });
             });
             
-            if (hasNewIframes) {
+            if (shouldProcess) {
                 setTimeout(() => this.processAllIframes(), 100);
             }
         });
 
-        // Start observing the entire workspace
         const workspaceEl = document.querySelector('.workspace');
         if (workspaceEl) {
             this.observer.observe(workspaceEl, {
@@ -90,29 +94,25 @@ export default class IframeResizerPlugin extends Plugin {
                 border-color: var(--interactive-accent);
             }
 
-            .iframe-container iframe {
-                position: absolute;
-                top: 0;
-                left: 0;
-                width: 100%;
-                height: 100%;
-                border: none;
-                display: block;
+            .iframe-container > iframe,
+            .iframe-container .internal-embed iframe {
+                position: absolute !important;
+                top: 0 !important;
+                left: 0 !important;
+                width: 100% !important;
+                height: 100% !important;
+                border: none !important;
+                display: block !important;
             }
 
-            /* Handle for Obsidian's media embeds */
-            .iframe-container .media-embed,
-            .iframe-container .external-embed {
+            /* Handle internal embeds */
+            .iframe-container > .internal-embed {
                 width: 100% !important;
                 height: 100% !important;
                 position: relative;
             }
 
-            .iframe-container .media-embed iframe,
-            .iframe-container .external-embed iframe {
-                position: absolute !important;
-                top: 0 !important;
-                left: 0 !important;
+            .iframe-container > .internal-embed > * {
                 width: 100% !important;
                 height: 100% !important;
             }
@@ -120,11 +120,6 @@ export default class IframeResizerPlugin extends Plugin {
             /* Resize handle styling */
             .iframe-container::-webkit-resizer {
                 background-color: transparent;
-                background-image: linear-gradient(-45deg, 
-                    transparent 40%, 
-                    var(--interactive-accent) 40%, 
-                    var(--interactive-accent) 60%, 
-                    transparent 60%);
             }
 
             .iframe-container::after {
@@ -132,8 +127,8 @@ export default class IframeResizerPlugin extends Plugin {
                 position: absolute;
                 bottom: 0;
                 right: 0;
-                width: 20px;
-                height: 20px;
+                width: 16px;
+                height: 16px;
                 cursor: nwse-resize;
                 background: linear-gradient(
                     135deg,
@@ -146,12 +141,12 @@ export default class IframeResizerPlugin extends Plugin {
             }
 
             .iframe-container:hover::after {
-                opacity: 0.3;
+                opacity: 0.5;
             }
 
-            /* Fix for internal embeds */
-            .internal-embed .iframe-container {
-                width: 100%;
+            /* Prevent iframe interaction during resize */
+            .iframe-container:active iframe {
+                pointer-events: none;
             }
         `;
         document.head.appendChild(styleEl);
@@ -163,105 +158,118 @@ export default class IframeResizerPlugin extends Plugin {
 
         const contentEl = activeView.contentEl;
         
-        // Process regular iframes
-        const iframes = contentEl.querySelectorAll('iframe');
-        iframes.forEach((iframe: HTMLIFrameElement) => {
-            // Skip if already processed
+        // Process all iframes, including those in embeds
+        const allIframes = contentEl.querySelectorAll('iframe');
+        allIframes.forEach((iframe: HTMLIFrameElement) => {
+            // Skip if already in a container
             if (iframe.closest('.iframe-container')) {
                 return;
             }
-            this.wrapIframe(iframe);
+
+            // Check if this is part of an internal embed
+            const internalEmbed = iframe.closest('.internal-embed');
+            if (internalEmbed && !internalEmbed.parentElement?.classList.contains('iframe-container')) {
+                this.wrapElement(internalEmbed as HTMLElement, iframe);
+            } else if (!internalEmbed) {
+                this.wrapElement(iframe, iframe);
+            }
         });
 
-        // Process Obsidian media embeds (from ![](URL) syntax)
-        const mediaEmbeds = contentEl.querySelectorAll('.media-embed, .external-embed');
-        mediaEmbeds.forEach((embed: HTMLElement) => {
-            // Skip if already processed
-            if (embed.closest('.iframe-container')) {
-                return;
-            }
-            
-            const iframe = embed.querySelector('iframe');
-            if (iframe) {
-                this.wrapEmbed(embed);
-            }
-        });
+        // Restore saved sizes
+        this.restoreSavedSizes();
     }
 
-    wrapIframe(iframe: HTMLIFrameElement) {
+    wrapElement(elementToWrap: HTMLElement, iframe: HTMLIFrameElement) {
         // Create container
         const container = document.createElement('div');
         container.className = 'iframe-container';
+        
+        // Generate ID for this iframe based on src
+        const iframeId = this.getIframeId(iframe);
+        container.setAttribute('data-iframe-id', iframeId);
         
         // Get dimensions
         let width = '600px';
         let height = '400px';
         
-        // Check iframe attributes
-        if (iframe.width) {
-            width = isNaN(Number(iframe.width)) ? iframe.width : `${iframe.width}px`;
-        } else if (iframe.style.width && iframe.style.width !== '100%') {
-            width = iframe.style.width;
-        }
-        
-        if (iframe.height) {
-            height = isNaN(Number(iframe.height)) ? iframe.height : `${iframe.height}px`;
-        } else if (iframe.style.height && iframe.style.height !== '100%') {
-            height = iframe.style.height;
-        }
-        
-        // For Obsidian embeds, check parent dimensions
-        const parent = iframe.parentElement;
-        if (parent && (parent.classList.contains('media-embed') || parent.classList.contains('external-embed'))) {
-            if (parent.style.width) width = parent.style.width;
-            if (parent.style.height) height = parent.style.height;
+        // Check for saved dimensions first
+        const saved = this.resizeData.get(iframeId);
+        if (saved) {
+            width = saved.width;
+            height = saved.height;
+        } else {
+            // Try to get dimensions from the element
+            const computedStyle = window.getComputedStyle(elementToWrap);
+            if (computedStyle.width && computedStyle.width !== 'auto' && computedStyle.width !== '100%') {
+                width = computedStyle.width;
+            }
+            if (computedStyle.height && computedStyle.height !== 'auto' && computedStyle.height !== '100%') {
+                height = computedStyle.height;
+            }
         }
         
         // Set container dimensions
         container.style.width = width;
         container.style.height = height;
         
-        // Insert container and move iframe
-        iframe.parentNode?.insertBefore(container, iframe);
-        container.appendChild(iframe);
+        // Insert container and move element
+        elementToWrap.parentNode?.insertBefore(container, elementToWrap);
+        container.appendChild(elementToWrap);
         
-        // Clear iframe dimensions so it fills container
-        iframe.removeAttribute('width');
-        iframe.removeAttribute('height');
-        iframe.style.width = '';
-        iframe.style.height = '';
+        // Add resize observer to save dimensions
+        this.observeResize(container);
     }
 
-    wrapEmbed(embed: HTMLElement) {
-        // Create container
-        const container = document.createElement('div');
-        container.className = 'iframe-container';
-        
-        // Get dimensions from the embed
-        let width = '600px';
-        let height = '400px';
-        
-        if (embed.style.width && embed.style.width !== '100%') {
-            width = embed.style.width;
-        }
-        if (embed.style.height && embed.style.height !== '100%') {
-            height = embed.style.height;
-        }
-        
-        // Set container dimensions
-        container.style.width = width;
-        container.style.height = height;
-        
-        // Insert container and move embed
-        embed.parentNode?.insertBefore(container, embed);
-        container.appendChild(embed);
-        
-        // Clear embed dimensions
-        embed.style.width = '';
-        embed.style.height = '';
+    getIframeId(iframe: HTMLIFrameElement): string {
+        // Create a unique ID based on the iframe src
+        const src = iframe.src || iframe.getAttribute('src') || '';
+        return btoa(src).replace(/[^a-zA-Z0-9]/g, '').substring(0, 20);
     }
 
-    onunload() {
+    observeResize(container: HTMLElement) {
+        const resizeObserver = new ResizeObserver((entries) => {
+            for (const entry of entries) {
+                const target = entry.target as HTMLElement;
+                const iframeId = target.getAttribute('data-iframe-id');
+                if (iframeId) {
+                    this.resizeData.set(iframeId, {
+                        width: target.style.width,
+                        height: target.style.height
+                    });
+                }
+            }
+        });
+        
+        resizeObserver.observe(container);
+        
+        // Store observer for cleanup
+        this.register(() => resizeObserver.disconnect());
+    }
+
+    restoreSavedSizes() {
+        document.querySelectorAll('.iframe-container[data-iframe-id]').forEach((container: HTMLElement) => {
+            const iframeId = container.getAttribute('data-iframe-id');
+            if (iframeId) {
+                const saved = this.resizeData.get(iframeId);
+                if (saved) {
+                    container.style.width = saved.width;
+                    container.style.height = saved.height;
+                }
+            }
+        });
+    }
+
+    async saveResizeData() {
+        const dataToSave = {
+            resizeData: Object.fromEntries(this.resizeData)
+        };
+        await this.saveData(dataToSave);
+    }
+
+    async onunload() {
+        // Save final resize data
+        await this.saveResizeData();
+
         // Stop observing
         if (this.observer) {
             this.observer.disconnect();
@@ -270,15 +278,10 @@ export default class IframeResizerPlugin extends Plugin {
         // Remove styles
         document.getElementById('iframe-resizer-styles')?.remove();
         
-        // Unwrap all iframes and embeds
+        // Unwrap all containers
         document.querySelectorAll('.iframe-container').forEach(container => {
             const content = container.firstElementChild;
             if (content && container.parentNode) {
-                // Restore dimensions if it's an embed
-                if (content.classList.contains('media-embed') || content.classList.contains('external-embed')) {
-                    (content as HTMLElement).style.width = container.style.width;
-                    (content as HTMLElement).style.height = container.style.height;
-                }
                 container.parentNode.insertBefore(content, container);
                 container.remove();
             }
