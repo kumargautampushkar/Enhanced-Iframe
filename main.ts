@@ -33,11 +33,9 @@ export default class IframeResizerPlugin extends Plugin {
         this.app.workspace.iterateRootLeaves((leaf) => {
             if (leaf.view instanceof MarkdownView) {
                 const view = leaf.view;
-                const iframes = view.contentEl.querySelectorAll('iframe');
+                const iframes = view.contentEl.querySelectorAll('iframe:not(.iframe-processed)');
                 iframes.forEach(iframe => {
-                    if (!iframe.parentElement?.classList.contains('iframe-resizer-wrapper')) {
-                        this.makeIframeResizable(iframe);
-                    }
+                    this.makeIframeResizable(iframe);
                 });
             }
         });
@@ -48,31 +46,54 @@ export default class IframeResizerPlugin extends Plugin {
 
     makeIframeResizable(iframe: HTMLIFrameElement) {
         // Skip if already processed
-        if (iframe.parentElement?.classList.contains('iframe-resizer-wrapper')) {
+        if (iframe.classList.contains('iframe-processed')) {
             return;
         }
+        iframe.classList.add('iframe-processed');
+
+        // Get original dimensions
+        const computedStyle = window.getComputedStyle(iframe);
+        let width = iframe.width || computedStyle.width || '600px';
+        let height = iframe.height || computedStyle.height || '400px';
+
+        // Convert to pixels if needed
+        if (typeof width === 'string' && width.includes('%')) {
+            width = '600px'; // Default width for percentage-based iframes
+        }
+        if (typeof height === 'string' && height.includes('%')) {
+            height = '400px'; // Default height for percentage-based iframes
+        }
+
+        // Ensure we have pixel values
+        width = typeof width === 'string' ? width : `${width}px`;
+        height = typeof height === 'string' ? height : `${height}px`;
 
         // Create wrapper
         const wrapper = document.createElement('div');
         wrapper.classList.add('iframe-resizer-wrapper');
-        
-        // Set initial dimensions
-        const width = iframe.width || '100%';
-        const height = iframe.height || '400px';
-        wrapper.style.width = width.toString().includes('%') ? width : `${width}px`;
-        wrapper.style.height = height.toString().includes('%') ? height : `${height}px`;
+        wrapper.style.width = width;
+        wrapper.style.height = height;
         wrapper.style.position = 'relative';
         wrapper.style.display = 'inline-block';
+        wrapper.style.overflow = 'hidden';
+        wrapper.style.boxSizing = 'border-box';
 
-        // Insert wrapper
-        iframe.parentNode?.insertBefore(wrapper, iframe);
-        wrapper.appendChild(iframe);
+        // Insert wrapper and move iframe into it
+        if (iframe.parentNode) {
+            iframe.parentNode.insertBefore(wrapper, iframe);
+            wrapper.appendChild(iframe);
+        }
 
-        // Style the iframe
+        // Reset iframe styles to fill wrapper
+        iframe.style.position = 'absolute';
+        iframe.style.top = '0';
+        iframe.style.left = '0';
         iframe.style.width = '100%';
         iframe.style.height = '100%';
-        iframe.style.border = '1px solid #ccc';
+        iframe.style.border = 'none';
         iframe.style.display = 'block';
+        iframe.removeAttribute('width');
+        iframe.removeAttribute('height');
 
         // Create resize handles
         this.createResizeHandle(wrapper, 'bottom-right');
@@ -89,6 +110,7 @@ export default class IframeResizerPlugin extends Plugin {
         handle.style.background = this.settings.handleColor;
         handle.style.opacity = '0';
         handle.style.transition = 'opacity 0.2s';
+        handle.style.zIndex = '10';
 
         if (position === 'bottom-right') {
             handle.style.width = `${this.settings.handleSize}px`;
@@ -96,14 +118,15 @@ export default class IframeResizerPlugin extends Plugin {
             handle.style.bottom = '0';
             handle.style.right = '0';
             handle.style.cursor = 'nwse-resize';
+            handle.style.borderRadius = '0 0 0 3px';
         } else if (position === 'bottom') {
             handle.style.width = '100%';
-            handle.style.height = `${this.settings.handleSize}px`;
+            handle.style.height = `${this.settings.handleSize / 2}px`;
             handle.style.bottom = '0';
             handle.style.left = '0';
             handle.style.cursor = 'ns-resize';
         } else if (position === 'right') {
-            handle.style.width = `${this.settings.handleSize}px`;
+            handle.style.width = `${this.settings.handleSize / 2}px`;
             handle.style.height = '100%';
             handle.style.top = '0';
             handle.style.right = '0';
@@ -115,7 +138,9 @@ export default class IframeResizerPlugin extends Plugin {
             handle.style.opacity = '0.5';
         });
         wrapper.addEventListener('mouseleave', () => {
-            handle.style.opacity = '0';
+            if (!handle.classList.contains('resizing')) {
+                handle.style.opacity = '0';
+            }
         });
 
         // Add resize functionality
@@ -132,26 +157,31 @@ export default class IframeResizerPlugin extends Plugin {
 
         const startResize = (e: MouseEvent) => {
             isResizing = true;
+            handle.classList.add('resizing');
             startX = e.clientX;
             startY = e.clientY;
             startWidth = wrapper.offsetWidth;
             startHeight = wrapper.offsetHeight;
 
-            // Prevent text selection during resize
+            // Prevent text selection and iframe interaction during resize
             e.preventDefault();
-            document.body.style.userSelect = 'none';
+            e.stopPropagation();
             
-            // Add overlay to prevent iframe from capturing mouse events
+            // Create overlay to prevent iframe from capturing mouse events
             const overlay = document.createElement('div');
             overlay.id = 'iframe-resize-overlay';
-            overlay.style.position = 'fixed';
-            overlay.style.top = '0';
-            overlay.style.left = '0';
-            overlay.style.width = '100%';
-            overlay.style.height = '100%';
-            overlay.style.zIndex = '9999';
-            overlay.style.cursor = handle.style.cursor;
+            overlay.style.cssText = `
+                position: fixed;
+                top: 0;
+                left: 0;
+                width: 100%;
+                height: 100%;
+                z-index: 9999;
+                cursor: ${handle.style.cursor};
+                user-select: none;
+            `;
             document.body.appendChild(overlay);
+            document.body.style.userSelect = 'none';
         };
 
         const resize = (e: MouseEvent) => {
@@ -177,17 +207,29 @@ export default class IframeResizerPlugin extends Plugin {
         const stopResize = () => {
             if (isResizing) {
                 isResizing = false;
+                handle.classList.remove('resizing');
                 document.body.style.userSelect = '';
                 
                 // Remove overlay
                 const overlay = document.getElementById('iframe-resize-overlay');
                 overlay?.remove();
+                
+                // Hide handle if not hovering
+                if (!wrapper.matches(':hover')) {
+                    handle.style.opacity = '0';
+                }
             }
         };
 
         handle.addEventListener('mousedown', startResize);
         document.addEventListener('mousemove', resize);
         document.addEventListener('mouseup', stopResize);
+        
+        // Clean up on plugin unload
+        this.register(() => {
+            document.removeEventListener('mousemove', resize);
+            document.removeEventListener('mouseup', stopResize);
+        });
     }
 
     async loadSettings() {
@@ -196,6 +238,17 @@ export default class IframeResizerPlugin extends Plugin {
 
     async saveSettings() {
         await this.saveData(this.settings);
+    }
+
+    onunload() {
+        // Clean up any remaining overlays
+        const overlay = document.getElementById('iframe-resize-overlay');
+        overlay?.remove();
+        
+        // Remove processed class from iframes
+        document.querySelectorAll('.iframe-processed').forEach(iframe => {
+            iframe.classList.remove('iframe-processed');
+        });
     }
 }
 

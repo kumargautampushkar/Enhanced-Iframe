@@ -1,14 +1,9 @@
-/*
-
-This CSS file will be included with your plugin, and
-available in the app when your plugin is enabled.
-
-If your plugin does not need CSS, delete this file.
-
-*/
 .iframe-resizer-wrapper {
     border: 1px solid transparent;
     transition: border-color 0.2s;
+    margin: 5px 0;
+    box-sizing: border-box;
+    max-width: 100%;
 }
 
 .iframe-resizer-wrapper:hover {
@@ -16,9 +11,29 @@ If your plugin does not need CSS, delete this file.
 }
 
 .iframe-resize-handle {
-    z-index: 10;
+    background-color: var(--interactive-accent);
+    transition: opacity 0.2s;
 }
 
 .iframe-resize-handle:hover {
     opacity: 0.8 !important;
+}
+
+.iframe-resize-handle.resizing {
+    opacity: 1 !important;
+}
+
+/* Ensure iframes don't interfere with resizing */
+.iframe-resizer-wrapper iframe {
+    pointer-events: none;
+}
+
+.iframe-resizer-wrapper:not(:hover) iframe {
+    pointer-events: auto;
+}
+
+/* Visual feedback during resize */
+.iframe-resizer-wrapper:has(.resizing) {
+    border-color: var(--interactive-accent-hover);
+    box-shadow: 0 0 0 2px rgba(var(--interactive-accent-rgb), 0.2);
 }
