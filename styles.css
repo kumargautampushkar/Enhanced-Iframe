@@ -6,3 +6,19 @@ available in the app when your plugin is enabled.
 If your plugin does not need CSS, delete this file.
 
 */
+.iframe-resizer-wrapper {
+    border: 1px solid transparent;
+    transition: border-color 0.2s;
+}
+
+.iframe-resizer-wrapper:hover {
+    border-color: var(--interactive-accent);
+}
+
+.iframe-resize-handle {
+    z-index: 10;
+}
+
+.iframe-resize-handle:hover {
+    opacity: 0.8 !important;
+}
